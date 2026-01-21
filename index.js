@@ -1,66 +1,79 @@
 require("dotenv").config();
-const path = require("path");
 const photo = require("./photo");
-const chat = require("./chat");
-const db = require("./db");
 const dist = require("sharp-phash/distance");
+const { Telegraf } = require("telegraf");
+const express = require("express"); // NEW: The fake website builder
 
 // Initialize bot
 const { BOT_TOKEN } = process.env;
-const { Telegraf } = require("telegraf");
 const bot = new Telegraf(BOT_TOKEN);
+
+// TEMPORARY MEMORY
+const chatMemory = new Map();
+
+// ---------------------------------------------------------
+// 🌐 THE HEARTBEAT SERVER (Keeps the cloud happy)
+// ---------------------------------------------------------
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get("/", (req, res) => {
+  res.send("Bot is running!");
+});
+
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+});
+
+// ---------------------------------------------------------
+// 🤖 THE BOT LOGIC
+// ---------------------------------------------------------
+
+bot.on("message", async (ctx) => {
+    const { message: msg } = ctx;
+
+    // IGNORE NON-PHOTOS
+    if (!msg.photo) return;
+
+    try {
+        const filePath = await photo.getFileUrl(msg.photo[0].file_id);
+        const fileDownloadUrl = photo.getFileDownloadUrl(filePath);
+        const currentPhash = await photo.getImagePHash(fileDownloadUrl);
+        
+        const chatId = msg.chat.id;
+        if (!chatMemory.has(chatId)) {
+            chatMemory.set(chatId, []);
+        }
+        
+        const history = chatMemory.get(chatId);
+        let isDuplicate = false;
+
+        for (const savedImage of history) {
+            // SENSITIVITY SETTING: 12 allows for slight differences (cropping)
+            const distance = await dist(savedImage.phash, currentPhash);
+            if (distance <= 12) {
+                isDuplicate = true;
+                break;
+            }
+        }
+
+        if (isDuplicate) {
+            await ctx.reply("⚠️ **Duplicate Photo Detected!**", { 
+                reply_to_message_id: msg.message_id, 
+                parse_mode: "Markdown" 
+            });
+        } else {
+            history.push({ phash: currentPhash, date: Date.now() });
+        }
+
+    } catch (e) {
+        console.error("Error processing photo:", e.message);
+    }
+});
+
+// Start the bot
 bot.launch();
 
-try {
-  bot.on("message", async (ctx) => {
-    const { message: msg, telegram } = ctx;
-    if (!msg.photo) return;
-    try {
-      // Get chat info
-      const chatId = chat.getChatId(msg.chat.id);
-      const messageLink = chat.getMessageLink(chatId, msg.message_id);
-
-      // Extract image download link from message
-      const filePath = await photo.getFileUrl(msg.photo[0].file_id);
-      const fileDownloadUrl = photo.getFileDownloadUrl(filePath);
-
-      // get image phash
-      const phash = await photo.getImagePHash(fileDownloadUrl);
-
-      // Create image history if new chat
-
-      if (!db.has(chatId).value()) {
-        db.set(chatId, [{ messageLink, phash, senderId: msg.from.id, date: Date.now() }]).write();
-        return;
-      }
-
-      const phashHistory = db.get(chatId).value();
-
-      const oldPics = [];
-
-      for (img of phashHistory) {
-        console.log(typeof img.sender, msg.from.id)
-        if (((await dist(img.phash, phash)) <= 5) && img.senderId !== msg.from.id) oldPics.push(img.messageLink);
-      }
-
-      db.get(chatId).push({ messageLink, phash, senderId: msg.from.id, date: Date.now() }).write();
-
-      if (!oldPics.length) return;
-
-      const __username = msg.from.username
-        ? `@${msg.from.username}`
-        : msg.from.first_name;
-      telegram.sendMessage(
-        msg.chat.id,
-        `[${__username}](tg://user?id=${
-          msg.from.id
-        }) заебал, уже было:\n${photo.printOldPhotos(oldPics)}`,
-        { reply_to_msg_id: msg.message_id, parse_mode: "Markdown" }
-      );
-    } catch (e) {
-      console.log("Error in photo handling: ", e);
-    }
-  });
-} catch (e) {
-  console.error("Error in bot event: ", e);
-}
+// Enable graceful stop
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
