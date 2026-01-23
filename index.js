@@ -51,7 +51,7 @@ bot.on("message", async (ctx) => {
         for (const savedImage of history) {
             // SENSITIVITY SETTING: 12 allows for slight differences (cropping)
             const distance = await dist(savedImage.phash, currentPhash);
-            if (distance <= 12) {
+            if (distance <= 5) {
                 isDuplicate = true;
                 break;
             }
